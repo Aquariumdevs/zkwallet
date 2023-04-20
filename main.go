@@ -206,6 +206,18 @@ func UpdateTxHash(source, state, counter []byte) ([]byte, []byte) {
         return hash, txdata
 }
 
+func contractTxHash(pad byte, source, amount, target, payload, counter []byte) ([]byte, []byte) { 
+        txdata := append(source, amount...)
+        txdata = append(txdata, pad)
+        txdata = append(txdata, target...)
+        txdata = append(txdata, payload...)
+	fmt.Println("AMOUNT: ", amount)
+	hash := hashData(txdata)
+	hashdata := append(hash, counter...)
+	hash = hashData(hashdata)
+	return hash, txdata
+}
+
 func transferUpdateTxHash(source, target, amount, state, counter []byte) ([]byte, []byte) { 
         txdata := append(source, target...)
 	txdata = append(txdata, amount...) 
@@ -261,6 +273,38 @@ func createAccountTxHash(spubkey, bpubkey, pop,  source, amount, counter []byte)
 	hashdata := append(hash, counter...)     
 	hash = hashData(hashdata)                                   
         return hash, txdata                                                  
+}
+
+func prepareContractPayload(payload []byte) byte {
+	//if txsize matches one preset size
+	// add 1 byte pad to the payload to 
+	//distinguish it
+	
+	txSize := len(payload) + 13
+	
+	switch txSize {
+	case 100:		
+	case 68:	
+	case 72:		
+	case 74:		
+	case 76:		
+	case 108:                   		
+	case 244:	
+	case 248:	
+	default:
+		return 0
+	}
+	
+	pad := byte(1)
+	payload = append(payload, pad)
+	return pad
+}
+
+func contractTx(privkey crypto.PrivKey, source, amount, target, payload, counter []byte) {
+        pad := prepareContractPayload(payload)
+	hash, data := contractTxHash(pad, source, amount, target, payload, counter)
+        data = signTx(privkey, hash, data)
+        sendTx(data)
 }
 
 func UpdateTx(privkey crypto.PrivKey, source, state, counter []byte) {
@@ -528,7 +572,7 @@ func test() {
 	fmt.Println(spubkey)
 	
 	counter = []byte{0, 0, 0, 6}
-	amount = []byte{0, 0, 0, 2}
+	amount = []byte{0, 2, 0, 8}
         stakeTx(sprivkey, source, amount, counter)
 	
 	counter = []byte{0, 0, 0, 7}
@@ -536,6 +580,9 @@ func test() {
 	
 	query([]byte{0, 0, 0, 0, 0, 0, 0, 6})
 	
+	counter = []byte{0, 0, 0, 8}
+	payload := counter
+        contractTx(sprivkey, source, amount, target, payload, counter)
 	//verifySchnorr(pubkey, sig, hash)
 }
 
@@ -633,6 +680,11 @@ func main() {
             		fmt.Println("Usage: wallet stakeTx <secret> <source> <amount> <counter>")
 			os.Exit(1)
 		}
+	case "contractTx":
+	       	if len(args) != 6 {
+            		fmt.Println("Usage: wallet contractTx <secret> <source> <amount> <target> <payload> <counter>")
+			os.Exit(1)
+		}
 	default:
 		fmt.Println("Unknown function:", function)
 		os.Exit(1)
@@ -728,6 +780,15 @@ func main() {
                 counter := decodedArgs[2]
 		sprivkey, _ := sKeyPair(secret)
                 releaseTx(sprivkey, source, counter)
+	case "contractTx":
+		secret := decodedArgs[0]
+    		source := decodedArgs[1]
+    		amount := decodedArgs[2]
+    		target := decodedArgs[3]
+    		payload := decodedArgs[4]
+	    	counter := decodedArgs[5]
+		sprivkey, _ := sKeyPair(secret)
+    		contractTx(sprivkey, source, amount, target, payload, counter)
 
 	default:
 		fmt.Println("Unknown function:", function)
