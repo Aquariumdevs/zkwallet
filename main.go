@@ -206,6 +206,17 @@ func UpdateTxHash(source, state, counter []byte) ([]byte, []byte) {
         return hash, txdata
 }
 
+func batchTxHash(pad byte, source, amount, multisignature, addresses, state, blockheight []byte) ([]byte, []byte) { 
+        txdata := append(source, amount...)
+        txdata = append(txdata, pad)
+        txdata = append(txdata, multisignature...)
+        txdata = append(txdata, state...)
+        txdata = append(txdata, blockheight...)
+        txdata = append(txdata, addresses...)
+	hash := hashData(txdata)
+	return hash, txdata
+}	
+	
 func contractTxHash(pad byte, source, amount, target, payload, counter []byte) ([]byte, []byte) { 
         txdata := append(source, amount...)
         txdata = append(txdata, pad)
@@ -303,6 +314,45 @@ func prepareContractPayload(payload []byte) byte {
 func contractTx(privkey crypto.PrivKey, source, amount, target, payload, counter []byte) {
         pad := prepareContractPayload(payload)
 	hash, data := contractTxHash(pad, source, amount, target, payload, counter)
+        data = signTx(privkey, hash, data)
+        sendTx(data)
+}
+
+func batchTx(privkey crypto.PrivKey, source, amount, state, blockheight []byte, sigsWithAddrs [][]byte) {
+	pad := byte(16)
+	var sigArray [][]byte
+	var addresses []byte
+	
+	var sig Signature
+	var dst = []byte("BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_")                     
+	
+	extState := append (state, blockheight...)
+	
+	for i := 0; i + 1 < len(sigsWithAddrs) ; i += 2 {
+		singleSig := sigsWithAddrs[i]
+		singleAddr := sigsWithAddrs[i+1]
+		
+		accountData := query(singleAddr)
+		if len(accountData) < 84 {
+			continue
+		}
+		
+		blsPubKey := accountData[36:84]
+		
+		if sig.VerifyCompressed(singleSig, true, blsPubKey, true, extState, dst) {
+			sigArray = append(sigArray, singleSig)
+			addresses = append(addresses, singleAddr...)
+		}
+	}
+	var agg blst.P2Aggregate
+	if !agg.AggregateCompressed(sigArray, true) {
+		panic("failed to aggregate signatures")
+		return
+	}
+	aff := agg.ToAffine()
+	multisignature := aff.Serialize()
+	
+	hash, data := batchTxHash(pad, source, amount, multisignature, addresses, state, blockheight)
         data = signTx(privkey, hash, data)
         sendTx(data)
 }
@@ -465,7 +515,7 @@ func  fromJson(body []byte, data string) interface{} {
 	return dt
 }
 
-func query(data []byte) interface{} {
+func query(data []byte) []byte {
 	hexString := hex.EncodeToString(data)
 	escapedTx := url.QueryEscape(hexString)                                        
         url := "http://localhost:26657/abci_query?data=0x" + escapedTx          
@@ -491,7 +541,27 @@ func query(data []byte) interface{} {
 		vl := fromJsonMap(rsp, "value")
 		fmt.Println("value:", vl)
  		resp.Body.Close()
-		return vl
+		
+		// vl is the variable of type interface{}
+		if encoded, ok := vl.(string); ok {
+    			// vl is of type []byte, do something with it
+			// Decode the string to binary data
+			//encoded = encoded[:len(encoded)-4]
+			fmt.Println(len(encoded), encoded)
+			//encoded = strings.TrimRight(encoded, "=")
+			for len(encoded)%4 != 0 {
+    				encoded += "="
+			}
+
+			bytes, err := base64.StdEncoding.DecodeString(encoded)
+			if err != nil {
+				panic(err)
+			}
+    			return bytes
+		} else {
+    			// vl is not of type []byte, handle the error
+    			return nil // or return an error, log, etc.
+		}
 	}
 	return nil
 }
@@ -532,23 +602,27 @@ func test() {
 	fmt.Println("Query tx by pk: ", q)
 	fmt.Println("Query tx by address...")
 	
-	Val, ok := q.(string)
-	if ok {
+	//Val, ok := q.(string)
+	//if ok {
+	/*
+	Val := string(q)
 		decoded, err := base64.StdEncoding.DecodeString(Val)
 		if err != nil {
 			fmt.Println("Error decoding base64 string:", err)
 			return
 		}
-		fmt.Println(decoded)
-		q = query(decoded)
-	}
+		fmt.Println(decoded)*/
+		q = query(q)
+	//}
 	
-	Val, ok = q.(string)                                                          
-        if ok {                                                                        
-                decoded, _ := base64.StdEncoding.DecodeString(Val)
+	//Val, ok = q.(string)                                                          
+        //if ok { 
+	/*
+	Val = string(q)                                                                       
+                decoded, _ = base64.StdEncoding.DecodeString(Val)
 		fmt.Println("decoded: ", decoded, " of length: ", len(decoded))
-	}
-	
+	//}
+	*/
 	query([]byte{0, 0, 0, 0})
 	
 	fmt.Println("Transfer tx...")
@@ -685,6 +759,11 @@ func main() {
             		fmt.Println("Usage: wallet contractTx <secret> <source> <amount> <target> <payload> <counter>")
 			os.Exit(1)
 		}
+	case "batchTx":
+	       	if len(args) < 7 || len(args) % 2 == 0 {
+            		fmt.Println("Usage: wallet contractTx <secret> <source> <amount> <state> <blockheight> <signature_1> <address_1> <signature_2> <address_2> ... <signature_n> <address_n>")
+			os.Exit(1)
+		}
 	default:
 		fmt.Println("Unknown function:", function)
 		os.Exit(1)
@@ -789,7 +868,16 @@ func main() {
 	    	counter := decodedArgs[5]
 		sprivkey, _ := sKeyPair(secret)
     		contractTx(sprivkey, source, amount, target, payload, counter)
-
+	case "batchTx":
+		secret := decodedArgs[0]
+    		source := decodedArgs[1]
+    		amount := decodedArgs[2]
+    		state := decodedArgs[3]
+    		blockheight := decodedArgs[4]
+		sprivkey, _ := sKeyPair(secret)
+		sigsWithAddresses := decodedArgs[5:]
+    		batchTx(sprivkey, source, amount, state, blockheight, sigsWithAddresses)
+		
 	default:
 		fmt.Println("Unknown function:", function)
 		os.Exit(1)
