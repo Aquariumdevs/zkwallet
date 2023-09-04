@@ -3,6 +3,7 @@ module wallet
 go 1.18
 
 require (
+	github.com/fatih/color v1.13.0
 	github.com/hbakhtiyor/schnorr v0.1.0
 	github.com/iden3/go-iden3-crypto v0.0.14
 	github.com/stretchr/testify v1.8.2
@@ -19,6 +20,8 @@ require (
 	github.com/gtank/merlin v0.1.1 // indirect
 	github.com/gtank/ristretto255 v0.1.2 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
+	github.com/mattn/go-colorable v0.1.13 // indirect
+	github.com/mattn/go-isatty v0.0.16 // indirect
 	github.com/mimoo/StrobeGo v0.0.0-20210601165009-122bf33a46e0 // indirect
 	github.com/petermattis/goid v0.0.0-20180202154549-b0b1615b78e5 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
