@@ -429,7 +429,7 @@ def update_state_hash():
 
 def verify_proofs(proof, blockchain_hash, stealth_tx):
     # Simulate proof verification with public inputs and blockchain path
-    print(f"Verifying proof {proof} for transaction {stealth_tx} against blockchain state hash {blockchain_hash} with blockchain path {blockchain_path}")
+    print(f"Verifying proof {proof} for transaction {stealth_tx} against blockchain state hash {blockchain_hash} ")
     return True  # Placeholder result
 
 def construct_proofs(state, stealth_tx, blockchain_path):
@@ -439,6 +439,7 @@ def construct_proofs(state, stealth_tx, blockchain_path):
 
 
 def receive_stealth():
+    state = load_wallet_state()
     transaction_hex = input("Enter the transaction hex you received: ").strip()
     transaction_data = json.loads(bytes.fromhex(transaction_hex).decode())
     stealth_tx = transaction_data['utxo']
@@ -456,6 +457,7 @@ def receive_stealth():
         # Construct a new proof for the updated state
         new_state_hash = calculate_state_hash(state['internal_state'])
         state['state_hash'] = new_state_hash
+        blockchain_path = "path_from_blockchain"  # Placeholder, this should come from an external query
         new_proofs = construct_proofs(state, stealth_tx, blockchain_path)
 
         save_wallet_state(state)
@@ -473,15 +475,16 @@ def send_stealth():
         print("Insufficient balance to perform the stealth transaction.")
         return
 
-    to_address = bytes.fromhex(to_address_hex).decode()
-    stealth_tx = {'address': to_address, 'amount': amount}
+    stealth_tx = {'address': to_address_hex, 'amount': amount}
     previous_state_hash = state['state_hash']
 
     state['internal_state']['utxos'].append(stealth_tx)
     state['internal_state']['balance'] -= amount
     new_state_hash = calculate_state_hash(state['internal_state'])
 
+    save_wallet_state(state)
     update_state_hash()
+    state = load_wallet_state()
 
     blockchain_path = "path_from_blockchain"  # Placeholder, this should come from an external query
     proofs = construct_proofs(state, stealth_tx, blockchain_path)
