@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"wallet/poseidon"
 
-	"github.com/vocdoni/arbo"
+	//"wallet/poseidon"
+	"crypto/sha256"
+	//"github.com/vocdoni/arbo"
 )
 
 func encodeHexResults(results [][]byte) (string, error) {
@@ -77,8 +78,12 @@ func fromJson(body []byte, data string) interface{} {
 }
 
 func hashData(data []byte) []byte {
-	h2, _ := poseidon.HashBytes(data)
+	//h2, _ := poseidon.HashBytes(data)
+	h2 := sha256.New()
+	h2.Write(data)
 
-	result := arbo.BigIntToBytes(32, h2)
+	result := h2.Sum(nil)
+
+	//result := arbo.BigIntToBytes(32, h2)
 	return result
 }

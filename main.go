@@ -68,13 +68,13 @@ func main() {
 			os.Exit(1)
 		}
 	case "transferTx":
-		if len(args) != 4 {
-			fmt.Println("Usage: wallet transferTx <secret> <source> <target> <amount>")
+		if len(args) != 5 {
+			fmt.Println("Usage: wallet transferTx <secret> <source> <target> <amount> <counter>")
 			os.Exit(1)
 		}
 	case "UpdateTx":
-		if len(args) != 3 {
-			fmt.Println("Usage: wallet UpdateTx <secret> <source> <statehash>")
+		if len(args) != 4 {
+			fmt.Println("Usage: wallet UpdateTx <secret> <source> <statehash> <counter>")
 			os.Exit(1)
 		}
 	case "changeAccountKeyTx":

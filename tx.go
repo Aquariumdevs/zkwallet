@@ -269,7 +269,7 @@ func signTx(privkey crypto.PrivKey, hash, txdata []byte) []byte {
 
 	fmt.Println("Schnorr signature:")
 	fmt.Println(sig2)
-	fmt.Println("Poseidon Hash:")
+	//fmt.Println("Poseidon Hash:")
 	fmt.Println(hash)
 
 	return data
@@ -355,11 +355,11 @@ func query(data []byte) []byte {
 			fmt.Println("Error: Response status code:", resp.StatusCode)
 			return nil
 		}
-		fmt.Println("Response body:", string(body))
+		//fmt.Println("Response body:", string(body))
 		res := fromJson(body, "result")
 		rsp := fromJsonMap(res, "response")
 		vl := fromJsonMap(rsp, "value")
-		fmt.Println("value:", vl)
+		//fmt.Println("value:", vl)
 		resp.Body.Close()
 
 		// vl is the variable of type interface{}
@@ -367,7 +367,7 @@ func query(data []byte) []byte {
 			// vl is of type []byte, do something with it
 			// Decode the string to binary data
 			//encoded = encoded[:len(encoded)-4]
-			fmt.Println(len(encoded), encoded)
+			//fmt.Println(len(encoded), encoded)
 			//encoded = strings.TrimRight(encoded, "=")
 			for len(encoded)%4 != 0 {
 				encoded += "="

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"crypto/sha256"
+	"golang.org/x/crypto/sha3"
 
 	blst "github.com/supranational/blst/bindings/go"
 
@@ -18,10 +18,10 @@ func bls(sk PrivateKey, hash, data, dst []byte) {
 
 func blsCompressedVerify(sig *Signature, sg, blspk, msg, dst []byte) bool {
 	if sig.VerifyCompressed(sg, false, blspk, true, msg, dst) {
-		fmt.Println("Pop Valid!")
+		//fmt.Println("Pop Valid!")
 		return true
 	} else {
-		fmt.Println("fuck")
+		//fmt.Println("fuck")
 		return false
 	}
 }
@@ -44,7 +44,7 @@ type AggregatePublicKey = blst.P1Aggregate
 
 func blsKeyPair(secretseed, source, counter []byte) (blst.SecretKey, PublicKey, []byte, []byte, []byte) {
 	//Bls from seed
-	fmt.Println("Bls from seed:")
+	//fmt.Println("Bls from seed:")
 
 	var dst = []byte("BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_")
 
@@ -59,22 +59,22 @@ func blsKeyPair(secretseed, source, counter []byte) (blst.SecretKey, PublicKey, 
 	blspk := pk.Compress()
 
 	//proof of possesion
-	h := sha256.New()
+	h := sha3.New256()
 	h.Write(blspk)
 	h.Write(source)
 	h.Write(counter)
-	sha2 := h.Sum(nil)
+	sha3 := h.Sum(nil)
 
-	sig := new(Signature).Sign(sk, sha2, dst)
+	sig := new(Signature).Sign(sk, sha3, dst)
 	pop := sig.Compress()
 
-	fmt.Println("____", source, counter)
-	fmt.Println("Hash: ", sha2)
-	fmt.Println("POP: ", pop)
-	fmt.Println("BLSPK: ", blspk)
+	//fmt.Println("____", source, counter)
+	//fmt.Println("Hash: ", sha3)
+	//fmt.Println("POP: ", pop)
+	//fmt.Println("BLSPK: ", blspk)
 
-	//fmt.Println(blspk, len(blspk), sha2, pop, len(pop))
-	blsCompressedVerify(sig, pop, blspk, sha2, dst)
+	//fmt.Println(blspk, len(blspk), sha3, pop, len(pop))
+	blsCompressedVerify(sig, pop, blspk, sha3, dst)
 	return *sk, *pk, blspk, pop, dst
 }
 
@@ -118,6 +118,6 @@ func generateRandomKeys(source, counter []byte) (secret []byte, sprivkey crypto.
 	sprivkey, spubkey = sKeyPair(secret)
 	_, _, blspk, pop, dst = blsKeyPair(secret, source, counter)
 
-	fmt.Println("NEWPUBKEY:    ", spubkey.Bytes())
+	//fmt.Println("NEWPUBKEY:    ", spubkey.Bytes())
 	return secret, sprivkey, spubkey, blspk, pop, dst, nil
 }
