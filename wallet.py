@@ -4,6 +4,41 @@ import json
 import sys
 import os
 import hashlib
+import requests
+import math
+import struct
+import base64
+
+def get_block_hash(height, tendermint_node_address="http://localhost:26657"):
+    """
+    Get the block hash for a given block height from a Tendermint node.
+
+    :param height: The block height to query for.
+    :param tendermint_node_address: The address of the Tendermint node (default is 'http://localhost:26657').
+    :return: The block hash as a string if successful, None otherwise.
+    """
+    # Construct the URL for querying the block
+    url = f"{tendermint_node_address}/block?height={height}"
+
+    try:
+        # Make the HTTP request to the Tendermint node
+        response = requests.get(url)
+
+        # Check if the request was successful
+        if response.status_code == 200:
+            # Parse the JSON response
+            block_data = response.json()
+
+            # Extract the block hash
+            block_hash = block_data['result']['block']['header']['app_hash']
+
+            return block_hash
+        else:
+            print(f"Failed to fetch block data: HTTP {response.status_code}")
+            return None
+    except requests.RequestException as e:
+        print(f"Error fetching block data: {e}")
+        return None
 
 # Path to the wallet state file
 wallet_state_file = 'wallet_state.json'
@@ -427,27 +462,363 @@ def update_state_hash():
     except Exception as e:
         print(f"Failed to update state hash: {e}")
 
-def verify_proofs(proof, blockchain_hash, stealth_tx):
+def transfer_with_update_state_hash():
+    state = load_wallet_state()
+    if not all(key in state for key in ['secret', 'address', 'counter', 'state_hash']):
+        print("Wallet is not properly initialized or missing vital information.")
+        return
+
+    state_backup = state
+
+    secret = state['secret']
+    state_hash = state['state_hash']  # Assume this is calculated elsewhere
+    counter_hex = int_to_hex_str(int(state['counter']))
+    source = int_to_hex_str(int(state['address']))
+
+    target = input("Enter the target address index: ").strip()
+
+    amount_input = input("Enter the amount to transfer: ").strip()
+    if not amount_input.isdigit() or int(amount_input) <= 0:
+        print("Invalid amount. Please enter a positive integer.")
+        return
+
+    # Convert the decimal amount to a hexadecimal string
+    amount_hex = int_to_hex_str(int(amount_input))
+
+    try:
+        show_balance()
+        state = load_wallet_state()
+        prev_balance = state['balance']
+        update_output = call_go_wallet("transferWithUpdateTx", [secret, source, target, amount_hex, state_hash, counter_hex])
+        show_balance()
+        state = load_wallet_state()
+        if prev_balance != state['balance']:
+            print("Update successful!")
+            state['counter'] += 1  # Increment the transaction counter
+            save_wallet_state(state)
+        else:
+            print("Unsuccessful operation!")
+    except Exception as e:
+        print(f"Failed to update state hash: {e}")
+        save_wallet_state(state_backup)
+
+
+def transfer_with_burn_to_stealth():
+    state = load_wallet_state()
+    if not all(key in state for key in ['secret', 'address', 'counter', 'state_hash']):
+        print("Wallet is not properly initialized or missing vital information.")
+        return
+
+    state_backup = state
+
+    secret = state['secret']
+    source = int_to_hex_str(int(state['address']))
+
+    # This is the burn address; funds sent here are considered 'burnt'
+    burn_address = '00000000'  
+
+    amount_input = input("Enter the amount to transfer to stealth: ").strip()
+    if not amount_input.isdigit() or int(amount_input) <= 0:
+        print("Invalid amount. Please enter a positive integer.")
+        return
+
+    amount = int(amount_input)
+    if state['balance'] < amount:
+        print("Insufficient balance to perform the operation.")
+        return
+
+    amount_hex = int_to_hex_str(amount)
+    counter_hex = int_to_hex_str(int(state['counter']))
+    state_hash = state['state_hash']  # The current state hash before updating
+
+    show_balance()
+    state = load_wallet_state()  # Reload state after the operation
+
+    # Adding the burnt amount to the stealth UTXOs
+    new_utxo = {'address': source, 'amount': amount}
+    state['internal_state']['utxos'].append(new_utxo)
+    state['internal_state']['balance'] += amount  # Update the stealth balance
+
+    # Update the internal state hash after adding the new transaction
+    new_state_hash = calculate_state_hash(state['internal_state'])
+    state['state_hash'] = new_state_hash
+    save_wallet_state(state)
+
+    try:
+        show_balance()
+        state = load_wallet_state()
+        prev_balance = state['balance']
+        # Sending the transparent funds to be burnt in exchange for stealth funds
+        transfer_output = call_go_wallet("transferWithUpdateTx", [secret, source, burn_address, amount_hex, state_hash, counter_hex])
+       
+        show_balance()
+        state = load_wallet_state()  # Reload state after the operation
+
+        if prev_balance == state['balance']:  # Checking if balance was correctly updated
+            print("Failed to burn transparent funds. Transaction unsuccessful.")
+            save_wallet_state(state_backup)
+        else:
+            print("Transparent funds successfully burnt. Updating stealth balance.")
+            state['counter'] += 1  # Increment the transaction counter
+
+            # Construct a new proof for the updated state
+            new_proofs = construct_proofs(state, new_utxo)
+
+            save_wallet_state(state)
+
+            print(f"Stealth balance updated successfully. New state hash: {new_state_hash}")
+            print(f"New proofs constructed for the updated state: {new_proofs}")
+    except Exception as e:
+        print(f"Failed to update state hash: {e}")
+        save_wallet_state(state_backup)
+
+
+def verify_proofs(proof, block_height, stealth_tx):
+    hash = get_block_hash(block_height)
     # Simulate proof verification with public inputs and blockchain path
-    print(f"Verifying proof {proof} for transaction {stealth_tx} against blockchain state hash {blockchain_hash} ")
+    verify_merkle_proofs(proof)
+    print(f"Verifying proof {proof} for transaction {stealth_tx} against blockchain state hash {hash} ")
     return True  # Placeholder result
 
-def construct_proofs(state, stealth_tx, blockchain_path):
-    # Simulate proof construction with necessary state details and blockchain path
-    print(f"Constructing proofs for transaction {stealth_tx} with blockchain path {blockchain_path}")
-    return "state_update_proof", "transaction_inclusion_proof"
+def verify_merkle_proofs(proof):
+    path_bytes = base64.b64decode(proof)
+    # Define the size of a hash (32 bytes for SHA-256)
+    hash_size = 32
+    offset = 0
 
+    # Extracting the first path
+    leafkey1 = path_bytes[offset:offset + 8]
+    offset += 8
+    leafval1 = path_bytes[offset:offset + hash_size]
+    offset += hash_size
+    root1 = path_bytes[offset:offset + hash_size]
+    offset += hash_size
+    out1, length = check_proof_print(leafkey1, leafval1, root1, path_bytes[offset:])
+    offset += length
+
+    # Extracting the second path
+    leafkey2 = path_bytes[offset:offset + 8]
+    offset += 8
+    leafval2 = path_bytes[offset:offset + hash_size]
+    offset += hash_size
+    root2 = path_bytes[offset:offset + hash_size]
+    offset += hash_size
+    out2, _ = check_proof_print(leafkey2, leafval2, root2, path_bytes[offset:])
+    out3 = root1 == leafval2
+    retrieved = get_block_hash(int.from_bytes(leafkey2, 'big')+1)
+    binary_string = bytes.fromhex(retrieved)
+    out4 = root2 == binary_string[32:]
+
+
+
+    print("leafkey1:", list(leafkey1))
+    print("leafval1:", list(leafval1))
+    print("root1:", list(root1))
+    print("leafkey2:", list(leafkey2))
+    print("leafval2:", list(leafval2))
+    print("root2:", list(root2))
+
+
+    print("retrieved:", list(binary_string))
+
+    # print(f"Leaves and paths unpacked. Block height: {block_height}")
+    print(f"Verified proofs for blockchain paths:")
+    print(out1, out2, out3, out4)
+
+    if out1 & out2 & out3 & out4:
+        return True
+    return False
+
+def construct_proofs(state, stealth_tx):
+    # Combine the address and counter into a single 8-byte string for querying
+    counter_hex = int_to_hex_str(int(state['counter']), 4)  # 4 bytes for the counter
+    query_param = state['address'] + counter_hex
+
+    try:
+        byte_string = call_go_wallet("query", [query_param])
+        # print(byte_string)
+        # blockchain_path = ''.join(format(int(b), '02x') for b in bytes_path)
+        # Remove the square brackets and split the string into a list of string numbers
+        byte_values = byte_string.strip('[]').split()
+        # Convert each string number to an integer and then to a byte array
+        blockchain_path = bytes([int(b) for b in byte_values])
+        # print(blockchain_path)
+    except Exception as e:
+        # print(f"Failed to query blockchain path: {e}")
+        return None
+
+    # Convert the received binary data into a bytes object
+    path_bytes = blockchain_path  
+
+    # Define the size of a hash (32 bytes for SHA-256)
+    hash_size = 32
+    offset = 0
+
+    # Extracting the first path
+    leafkey1 = path_bytes[offset:offset + 8]
+    offset += 8
+    leafval1 = path_bytes[offset:offset + hash_size]
+    offset += hash_size
+    root1 = path_bytes[offset:offset + hash_size]
+    offset += hash_size
+    out1, length = check_proof_print(leafkey1, leafval1, root1, path_bytes[offset:])
+    offset += length
+
+    # Extracting the second path
+    leafkey2 = path_bytes[offset:offset + 8]
+    offset += 8
+    leafval2 = path_bytes[offset:offset + hash_size]
+    offset += hash_size
+    root2 = path_bytes[offset:offset + hash_size]
+    offset += hash_size
+    out2, _ = check_proof_print(leafkey2, leafval2, root2, path_bytes[offset:])
+    out3 = root1 == leafval2
+
+
+
+
+    print("leafkey1:", list(leafkey1))
+    print("leafval1:", list(leafval1))
+    print("root1:", list(root1))
+    print("leafkey2:", list(leafkey2))
+    print("leafval2:", list(leafval2))
+    print("root2:", list(root2))
+
+
+
+
+    # print(f"Leaves and paths unpacked. Block height: {block_height}")
+    print(f"Constructing proofs for transaction {stealth_tx} with blockchain paths")
+    print(out1, out2, out3)
+
+    return str(base64.b64encode(blockchain_path))
+
+
+
+
+HASH_LEN = hashlib.sha256().digest_size
+
+def unpack_siblings(b):
+    full_len = struct.unpack_from('<H', b, 0)[0]
+    l = struct.unpack_from('<H', b, 2)[0]
+    if len(b) < full_len:
+        raise ValueError(f"expected len: {full_len}, current len: {len(b)}")
+
+    bitmap_bytes = b[4:4 + l]
+    bitmap = bytes_to_bitmap(bitmap_bytes)
+    siblings_bytes = b[4 + l:full_len]
+    i_sibl = 0
+    empty_sibl = bytes(HASH_LEN)
+    siblings = []
+    for i in range(len(bitmap)):
+        if i_sibl >= len(siblings_bytes):
+            break
+        if bitmap[i]:
+            siblings.append(siblings_bytes[i_sibl:i_sibl + HASH_LEN])
+            # print("sibling:", list(siblings_bytes[i_sibl:i_sibl + HASH_LEN]))
+            i_sibl += HASH_LEN
+        else:
+            siblings.append(empty_sibl)
+            # print("sibling:", list(empty_sibl))
+    return siblings, full_len
+
+def bytes_to_bitmap(bitmap_bytes):
+    """Convert bitmap bytes to a list of boolean values."""
+    bitmap = []
+    if len(bitmap_bytes) == 0:
+        bitmap_bytes = bytearray(8)
+
+    for byte in bitmap_bytes:
+        for i in range(8):
+            # Shift bit and check if it's set
+            bitmap.append(bool(byte & (1 << i) > 0))
+    return bitmap
+
+
+def get_path(num_levels, k):
+    path = []
+    for n in range(num_levels):
+        byte_index = n // 8
+        bit_index = n % 8
+        byte_value = k[byte_index]
+        bit_value = (byte_value & (1 << bit_index)) != 0
+        path.append(bit_value)
+    return path
+
+def new_leaf_value(k, v):
+    if len(k) > 255 or len(v) > 65535:
+        raise ValueError(f"Key or value length is too long")
+    hasher = hashlib.sha256()
+    hasher.update(k + v + bytes([1]))
+    leaf_key = hasher.digest()
+    # print("k:", list(k))
+    # print("v:", list(v))
+    # print("lk:", list(leaf_key))
+
+    leaf_value = bytes([1, len(k)]) + k + v
+    # print("lv:", list(leaf_value))
+    return leaf_key, leaf_value
+
+def new_intermediate(l, r):
+    if len(l) > 255:
+        raise ValueError(f"Left key length is too long")
+    b = bytes([2, len(l)]) + l + r
+    hasher = hashlib.sha256()
+    hasher.update(l + r)
+    key = hasher.digest()
+    # print("IM:", list(key))
+    return key, b
+
+def check_proof_print(k, v, root, packed_siblings):
+    siblings, length = unpack_siblings(packed_siblings)
+    key_path = bytearray(math.ceil(len(siblings) / 8))
+    key_path[:len(k)] = k
+
+    key, _ = new_leaf_value(k, v)
+    #print("key:", list(key))
+
+    path = get_path(len(siblings), key_path)
+    for i in reversed(range(len(siblings))):
+        if path[i]:
+            key, _ = new_intermediate(siblings[i], key)
+            #print("L:", list(key))
+        else:
+            key, _ = new_intermediate(key, siblings[i])
+            #print("R:", list(key))
+
+    if key == root:
+        print("success")
+        return True, length
+    else:
+        print("FAIL")
+        return False, length
+
+
+def is_utxo_included(address, amount, utxos):
+    print(f"Checking for UTXO with address {address} and amount {amount}...")
+    for utxo in utxos:
+        print(f"Comparing with UTXO {utxo['address']} amount {utxo['amount']}")
+        if utxo['address'] == address and utxo['amount'] == amount:
+            print("Match found.")
+            return True
+    print("No match found.")
+    return False
 
 def receive_stealth():
     state = load_wallet_state()
     transaction_hex = input("Enter the transaction hex you received: ").strip()
     transaction_data = json.loads(bytes.fromhex(transaction_hex).decode())
     stealth_tx = transaction_data['utxo']
-    proofs = transaction_data['proofs']
+    proofs = (transaction_data['proofs'])[2:-1]
 
-    blockchain_hash = "current_blockchain_hash"  # This would typically come from a blockchain query
-
-    if verify_proofs(proofs, blockchain_hash, stealth_tx):
+    if is_utxo_included(transaction_data['utxo']['address'], transaction_data['utxo']['amount'], state['internal_state']['utxos']):
+        print("The UTXO is already included in the state.")
+        return
+    else:
+        print("The UTXO is not included in the state.")
+  
+    blockchain_height = 1  # This would typically come from the proof analysis
+    if verify_proofs(proofs, blockchain_height, stealth_tx):
         print("Proof verified successfully.")
    
         # Update the internal state with the received transaction
@@ -457,8 +828,8 @@ def receive_stealth():
         # Construct a new proof for the updated state
         new_state_hash = calculate_state_hash(state['internal_state'])
         state['state_hash'] = new_state_hash
-        blockchain_path = "path_from_blockchain"  # Placeholder, this should come from an external query
-        new_proofs = construct_proofs(state, stealth_tx, blockchain_path)
+
+        new_proofs = construct_proofs(state, stealth_tx)
 
         save_wallet_state(state)
         print(f"State updated successfully. New state hash: {new_state_hash}")
@@ -470,7 +841,9 @@ def send_stealth():
     state = load_wallet_state()
     to_address_hex = input("Enter the stealth address (hex) to send to: ").strip()
     amount = int(input("Enter the amount to send: ").strip())
-
+    
+    state_backup = state
+ 
     if state['internal_state']['balance'] < amount:
         print("Insufficient balance to perform the stealth transaction.")
         return
@@ -478,23 +851,59 @@ def send_stealth():
     stealth_tx = {'address': to_address_hex, 'amount': amount}
     previous_state_hash = state['state_hash']
 
-    state['internal_state']['utxos'].append(stealth_tx)
+    if is_utxo_included(stealth_tx['address'], stealth_tx['amount'], state['internal_state']['hidden_output_txs']):
+        print("The stealth transaction is already included in the state. Try with another stealth address or amount.")
+        return
+    else:
+        print("The UTXO is not included in the state.")
+
+    state['internal_state']['hidden_output_txs'].append(stealth_tx)
     state['internal_state']['balance'] -= amount
     new_state_hash = calculate_state_hash(state['internal_state'])
 
     save_wallet_state(state)
-    update_state_hash()
-    state = load_wallet_state()
 
-    blockchain_path = "path_from_blockchain"  # Placeholder, this should come from an external query
-    proofs = construct_proofs(state, stealth_tx, blockchain_path)
-    # Generate the transaction hex that will be sent to the receiver
-    transaction_data = {'utxo': stealth_tx, 'proofs': proofs}
-    transaction_hex = json.dumps(transaction_data).encode().hex()
+    if not all(key in state for key in ['secret', 'address', 'counter', 'state_hash']):
+        print("Wallet is not properly initialized or missing vital information.")
+        return
+
+    secret = state['secret']
+    state_hash = state['state_hash']  # Assume this is calculated elsewhere
+    counter_hex = int_to_hex_str(int(state['counter']))
+    source = int_to_hex_str(int(state['address']))
+
+    show_balance()
+    state = load_wallet_state()
+    prev_balance = state['balance']
+
+    try:
+        update_output = call_go_wallet("UpdateTx", [secret, source, state_hash, counter_hex])
+        show_balance()
+        state = load_wallet_state()
+        if prev_balance != state['balance']:
+            print("Update successful!")
+            state['counter'] += 1  # Increment the transaction counter
+            save_wallet_state(state)
+
+            state = load_wallet_state()
+
+
+            proofs = construct_proofs(state, stealth_tx)
+            # Generate the transaction hex that will be sent to the receiver
+            transaction_data = {'utxo': stealth_tx, 'proofs': proofs}
+            transaction_hex = json.dumps(transaction_data).encode().hex()
     
-    state['state_hash'] = new_state_hash
-    save_wallet_state(state)
-    print(f"Transaction hex to send: {transaction_hex}")
+            state['state_hash'] = new_state_hash
+            save_wallet_state(state)
+            print(f"Transaction hex to send: {transaction_hex}")
+
+        else:
+            print("Unsuccessful operation!")
+            save_wallet_state(state_backup)
+    except Exception as e:
+        print(f"Failed to update state hash: {e}")
+        save_wallet_state(state_backup)
+            
 
 def show_stealth_addresses():
     state = load_wallet_state()
@@ -507,21 +916,33 @@ def show_stealth_addresses():
     else:
         print("No stealth addresses found.")
 
+def show_stealth_balance():
+    state = load_wallet_state()
+    stealth_balance = state['internal_state'].get('balance', 0)
+
+    print(f"Stealth Balance: {stealth_balance}")
+
 
 def help():
     print("Usage: wallet.py <command> \n")
     print("Available commands:")
-    print("  init     - Initializes the wallet by creating a new key pair.")
-    print("  keys     - Shows keys and information of the wallet.")
-    print("  balance  - Shows the balance of the wallet.")
-    print("  delete   - Deletes the local wallet state.")
-    print("  create   - Used by a sponsor to create and fund a wallet on the blockchain.")
-    print("  transfer - Transfers funds from the wallet to another address.")
-    print("  stake    - Stakes a specified amount in the wallet.")
-    print("  unstake  - Unstakes funds from the blockchain.")
-    print("  update   - Updates hidden state hash on the blockchain.")
-    print("  help     - Shows this help message.")
+    print("  init                  - Initializes the wallet by creating a new key pair.")
+    print("  keys                  - Shows keys and information of the wallet.")
+    print("  balance               - Shows the balance of the wallet.")
+    print("  delete                - Deletes the local wallet state.")
+    print("  create                - Used by a sponsor to create and fund a wallet on the blockchain.")
+    print("  transfer              - Transfers funds from the wallet to another address.")
+    print("  stake                 - Stakes a specified amount in the wallet.")
+    print("  unstake               - Unstakes funds from the blockchain.")
+    print("  update                - Updates hidden state hash on the blockchain.")
+    print("  send_stealth          - Sends a stealth transaction to another stealth address.")
+    print("  receive_stealth       - Receives a stealth transaction from another user.")
+    print("  show_stealth_addresses - Shows all stealth addresses associated with the wallet.")
+    print("  show_stealth_balance  - Shows the balance of the stealth wallet.")
+    print("  transfer_to_stealth   - Transfers and burns transparent funds to stealth balance.")
+    print("  help                  - Shows this help message.")
     print("\nFor other commands, they will be passed directly to the low level Go wallet with the provided arguments.")
+
 
 def interactive():
     state = load_wallet_state()
@@ -543,10 +964,12 @@ def interactive():
             print("4. Unstake Funds")
             print("5. Delete Wallet")
             print("6. Fund New Wallet")
-            print("7. Initialize hidden state")
-            print("8. Send stealth transaction")
-            print("9. Receive stealth transaction")
-            print("10. Show stealth address")
+            print("7. Initialize Hidden State")
+            print("8. Send Stealth Transaction")
+            print("9. Receive Stealth Transaction")
+            print("10. Show Stealth Addresses")
+            print("11. Show Stealth Balance")
+            print("12. Transfer to Stealth")
             print("x. Exit")
 
             choice = input("Select an operation: ").strip()
@@ -557,27 +980,32 @@ def interactive():
             elif choice == '3':
                 stake()
             elif choice == '4':
-                unstake()  # Assuming you have an 'unstake' function implemented
+                unstake()
             elif choice == '5':
                 delete_wallet()
                 break  # Exiting after deletion as no operations can be performed on a deleted wallet
             elif choice == '6':
                 sponsor_create_account()
             elif choice == '7':
-                initialize_hidden_state()
+                initialize_hidden_state(state)
             elif choice == '8':
                 send_stealth()
             elif choice == '9':
                 receive_stealth()
             elif choice == '10':
                 show_stealth_addresses()
-            elif choice == 'x':
+            elif choice == '11':
+                show_stealth_balance()
+            elif choice == '12':
+                transfer_with_burn_to_stealth()
+            elif choice.lower() == 'x':
                 print("Exiting wallet application.")
                 break
             else:
                 print("Invalid choice, please select a valid operation.")
     else:
         print("Wallet initialization failed or was incomplete. Please check and try again.")
+
 
 
 def main():
@@ -606,6 +1034,16 @@ def main():
         unstake()
     elif function == 'update':
         update_state_hash()
+    elif function == 'send_stealth':
+        send_stealth()
+    elif function == 'receive_stealth':
+        receive_stealth()
+    elif function == 'show_stealth_addresses':
+        show_stealth_addresses()
+    elif function == 'show_stealth_balance':
+        show_stealth_balance()
+    elif function == 'transfer_to_stealth':
+        transfer_with_burn_to_stealth()
     elif function == 'help':
         help()
     else:
@@ -615,3 +1053,15 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+#TODO zk logic
+#TODO fix unstake command to not brake the wallet when fail
+#TODO batches
+#TODO contracts
+#TODO security checks
+#TODO query for tx success instead of relying to balance... highly unsafe
+#TODO wallet backups, recovery and encryption

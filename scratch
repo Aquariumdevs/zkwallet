@@ -1,0 +1,142 @@
+
+
+
+
+
+
+def bytes_to_bitmap(bitmap_bytes):
+    """Convert bitmap bytes to a list of boolean values."""
+    print("3.7")
+    bitmap = []
+    if len(bitmap_bytes) == 0:
+        bitmap_bytes = bytearray(8)
+
+    for byte in bitmap_bytes:
+        for i in reversed(range(8)):
+            # Shift bit and check if it's set
+            bitmap.append(bool(int(byte) & (1 << i)))
+    return bitmap
+
+import struct  # Import struct to help with byte manipulation
+
+def unpack_siblings(packed_bytes, offset, hash_len=32):
+    """Unpack siblings from the packed representation."""
+    
+    # Extract full length and bitmap length (L), both are little-endian
+    full_length = struct.unpack_from('<H', packed_bytes, offset)[0]
+    offset += 2
+    l = struct.unpack_from('<H', packed_bytes, offset)[0]
+    offset += 2
+
+    # Extract the bitmap
+    bitmap_bytes = packed_bytes[offset:offset + l]
+    bitmap = bytes_to_bitmap(bitmap_bytes)
+    offset += l
+
+    # Extract the siblings based on the bitmap
+    siblings_bytes = packed_bytes[offset:offset + (full_length - 2 - 2 - l)]
+    siblings = []
+    i_sibl = 0
+    empty_sibl = bytes([0] * hash_len)  # Empty sibling of hash length
+
+    for bit in bitmap:
+        if bit:
+            sibling = siblings_bytes[i_sibl:i_sibl + hash_len]
+            siblings.append(sibling)
+            i_sibl += hash_len
+            print(list(sibling))
+        else:
+            siblings.append(empty_sibl)
+            print(list(empty_sibl))
+    return siblings, offset + i_sibl
+
+
+def new_intermediate(hashFunc, left_key, right_key):
+    """
+    Takes the left and right keys of an intermediate node, computes its hash,
+    and returns the hash of the node (node key) and a byte array containing
+    the value (left and right child keys) to store in the DB.
+
+    :param hashFunc: Hash function object with a `hash` method
+    :param left_key: Left child key as a byte array
+    :param right_key: Right child key as a byte array
+    :return: Tuple of node key (hash) and value byte array
+    """
+    max_uint8 = 255
+    hash_len = 32#len(hashFunc(left_key, right_key).digest())  # Assume hash function gives the correct length
+    prefix_value_len = 2  
+    prefix_value_intermediate = 2  
+
+    if len(left_key) > max_uint8:
+        raise ValueError(f"newIntermediate: len(left_key) > {max_uint8}")
+
+    # Construct the byte array for the node value
+    b = bytearray(prefix_value_len + hash_len * 2)
+    b[0] = prefix_value_intermediate
+    b[1] = len(left_key)
+    b[prefix_value_len:prefix_value_len + len(left_key)] = left_key
+    b[prefix_value_len + len(left_key):] = right_key
+
+    # Concatenate left and right keys for the hash input
+    combined_keys = join(left_key, right_key)
+
+    # Compute the hash key for the node
+    node_key = hashFunc(combined_keys).digest()
+    print(list(node_key))
+    return node_key, bytes(b)
+
+
+def join(*args):
+    """
+    Concatenate all arguments and compute the SHA-256 hash.
+    """
+    to_hash = b''.join(args)  # Concatenate all byte arrays
+    return to_hash
+
+def check_proof(hash_func, k, v, root, siblings):
+    key_path = k  # In binary trees, the key path might be used differently; adjust as needed
+
+    key, _ = new_leaf_value(hash_func, k, v)
+
+    path = get_path(len(siblings), key_path)
+
+    for i in reversed(range(len(siblings))):
+        if path[i]:
+            key, _ = new_intermediate(hash_func, siblings[i], key)
+        else:
+            key, _ = new_intermediate(hash_func, key, siblings[i])
+
+        print(list(key))
+        if key == root:
+            return True
+
+    return False
+
+def get_path(num_levels, bitmap_bytes):
+    """
+    Generate the path for tree traversal based on a bitmap created in a little-endian system.
+
+    :param bitmap_bytes: Bitmap bytes array created in a little-endian system.
+    :param num_levels: The number of levels or bits to consider for the path.
+    :return: A list of boolean values, each representing a direction in the tree based on the bitmap.
+    """
+    path = []
+    # Iterate over each byte in the bitmap
+    for byte in bitmap_bytes:
+        # Iterate over each bit position in the current byte
+        for i in range(8):
+            # Extract the bit at the current position from the byte
+            bit = (byte >> i) & 1
+            # Append the bit as a boolean value to the path
+            path.append(bool(bit))
+            # Stop if we've reached the required number of levels
+            if len(path) == num_levels:
+                return path
+
+    return path
+
+
+def new_leaf_value(hash_func, k, v):
+    leaf_key = hash_func(join(k, v, b'\x01')).digest()
+    leaf_value = bytes([1, len(k)]) + k + v
+    return leaf_key, leaf_value
